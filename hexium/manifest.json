@@ -1,0 +1,10 @@
+{
+    "name":  "FiresLoreBooks",
+    "version_number":  "0.0.8",
+    "website_url":  "https://github.com/fire-VA/FiresLoreBooks",
+    "description":  "Lore books you place, read, collect and edit, and journals you write yourself.",
+    "dependencies":  [
+                         "denikson-BepInExPack_Valheim-5.4.2350",
+                         "incompletionists-FiresUnifiedCore-0.2.387"
+                     ]
+}
