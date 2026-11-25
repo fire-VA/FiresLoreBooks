@@ -77,7 +77,7 @@ namespace FiresLoreBooks.UI
             _left.text = _right.text = "";
             _open = true;
             _root.SetActive(true);
-            FiresCore.Input.FiresInputBlock.Acquire(_inputToken);
+            InputGate.Acquire(_inputToken, this);   // 0.0.18: owner-held (Core 0.2.697)
             Books.Ledger.RequestCollection((total, titles) =>
             {
                 if (!_open || _bookId != null) return;
@@ -113,7 +113,7 @@ namespace FiresLoreBooks.UI
             _left.text = _right.text = "";
             _open = true;
             _root.SetActive(true);
-            FiresCore.Input.FiresInputBlock.Acquire(_inputToken);
+            InputGate.Acquire(_inputToken, this);   // 0.0.18: owner-held (Core 0.2.697)
             BookStore.Get(bookId, Fill);
         }
 

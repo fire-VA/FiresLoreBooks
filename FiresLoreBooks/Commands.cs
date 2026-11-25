@@ -28,6 +28,17 @@ namespace FiresLoreBooks
                 if (!Directory.Exists(BookStore.BooksDir)) { args.Context.AddString("[LoreBooks] no books yet: " + BookStore.BooksDir); return; }
                 foreach (string f in Directory.GetFiles(BookStore.BooksDir, "*.txt")) args.Context.AddString("  " + Path.GetFileNameWithoutExtension(f));
             });
+            new Terminal.ConsoleCommand("lorebook_library", "- the admin lore book library: New / Open / Delete (admin)", args => UI.BookLibrary.Open());
+            // The lead's launcher runs "<area>_test" commands (R-1012B refused "lorebook_selftest"), so the test is lorebooks_test;
+            // the old name stays as an alias.
+            Terminal.ConsoleEvent selfTest = args =>
+            {
+                if (FiresLoreBooksPlugin.Instance == null) { args.Context.AddString("[LoreBooks] SELFTEST no plugin instance"); return; }
+                FiresLoreBooksPlugin.Instance.StartCoroutine(SelfTest.Run(args.Context));
+            };
+            // "[F5 test]" in the description = FDT's runner launches it as a contract test (R-1012D: "not a contract test, skipped").
+            new Terminal.ConsoleCommand("lorebooks_test", "[F5 test] [FiresLoreBooks] pieces on the Hammer, admin new book saved + listed, a rotated picture survives, a placed book shows it (admin)", selfTest);
+            new Terminal.ConsoleCommand("lorebook_selftest", "- alias of lorebooks_test", selfTest);
         }
     }
 }

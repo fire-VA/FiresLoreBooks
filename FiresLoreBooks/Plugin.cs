@@ -1,5 +1,6 @@
 using BepInEx;
 using BepInEx.Logging;
+using FiresCore.Sync;
 using HarmonyLib;
 
 namespace FiresLoreBooks
@@ -15,17 +16,36 @@ namespace FiresLoreBooks
     {
         public const string PluginGUID = "com.Fire.FiresLoreBooks";
         public const string PluginName = "FiresLoreBooks";
-        public const string PluginVersion = "0.0.9";
+        public const string PluginVersion = "0.0.19";
+        // The oldest version whose synced setting (Respawn after taking) a client must match; raised only when it changes.
+        public const string SyncFloor = "0.0.14";
 
         internal static ManualLogSource Log;
+        internal static FiresLoreBooksPlugin Instance;
         internal static BepInEx.Configuration.ConfigEntry<string> DefaultRespawn;
+        private ConfigSync _sync;
         private Harmony _harmony;
+
+        // 0.0.19 quit guard (Core's pattern): at application quit OnDestroy skips UnpatchSelf. Unpatching then makes Harmony rebuild
+        // every shared method while the game exits ([ghost] 11-08, Fire's 28 s quit freeze). A mid-session unload still unpatches.
+        private static bool s_quitting;
 
         private void Awake()
         {
+            UnityEngine.Application.quitting += () => s_quitting = true;
             Log = Logger;
+            Instance = this;
+            // 0.0.14 (config audit 10-13): the respawn time is a world rule, so the server's value is synced to every client and only an
+            // admin can change it. The Pictures keys are bound here too, so they show in the config from the start, not on first camera use.
+            _sync = new ConfigSync(PluginGUID) { DisplayName = PluginName, CurrentVersion = PluginVersion, MinimumRequiredVersion = SyncFloor, IsLocked = true };
             DefaultRespawn = Config.Bind("Books", "Respawn after taking", "4d",
-                "Server: how long until a player can take another copy of the same placed book (4d = 4 game days, 12h, 30m, never). A book's own '# respawn:' line wins.");
+                "How long until a player can take another copy of the same placed book. Format: a number and a unit - d = game days, "
+                + "h = game hours, m = game minutes (e.g. 4d, 12h, 30m) - or never. A plain number means game days. A book's own '# respawn:' "
+                + "line wins over this. [Synced with Server; admin only]");
+            _sync.AddConfigEntry(DefaultRespawn);
+            DefaultRespawn.SettingChanged += (_, __) => CheckRespawn();
+            CheckRespawn();
+            FiresPictures.Camera.BindConfig(Config);
             _harmony = new Harmony(PluginGUID);
             _harmony.PatchAll(typeof(FiresLoreBooksPlugin).Assembly);
             SeedExample();
@@ -33,6 +53,14 @@ namespace FiresLoreBooks
         }
 
         private void Update() => Books.BookStore.Tick();
+
+        // A value the parser can't read falls back to 4 game days; say so instead of doing it silently.
+        private static void CheckRespawn()
+        {
+            string v = (DefaultRespawn.Value ?? "").Trim().ToLowerInvariant();
+            if (v != "never" && !System.Text.RegularExpressions.Regex.IsMatch(v, @"^\d+(\.\d+)?[dhm]?$"))
+                Log.LogWarning($"Respawn after taking = '{DefaultRespawn.Value}' isn't a duration (4d, 12h, 30m or never): 4 game days are used");
+        }
 
         /// <summary>An empty Books folder gets one example book, so `lorebook_open example_lore` works out of the box.</summary>
         private static void SeedExample()
@@ -51,6 +79,6 @@ namespace FiresLoreBooks
             catch (System.Exception e) { Log.LogWarning($"[LoreBooks] seeding the example book failed: {e.Message}"); }
         }
 
-        private void OnDestroy() => _harmony?.UnpatchSelf();
+        private void OnDestroy() { if (!s_quitting) _harmony?.UnpatchSelf(); }
     }
 }

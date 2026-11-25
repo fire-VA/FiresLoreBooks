@@ -64,7 +64,7 @@ namespace FiresLoreBooks.UI
             FiresLoreBooksPlugin.Log.LogDebug($"[LoreBooks] editor opened for '{bookId}'");
             _open = true;
             _root.SetActive(true);
-            FiresCore.Input.FiresInputBlock.Acquire(_inputToken);
+            InputGate.Acquire(_inputToken, this);   // 0.0.18: owner-held (Core 0.2.697)
             _status.text = "loading…";
             _doc = new BookDoc { Id = bookId };
             _doc.Pages.Add("");
@@ -210,6 +210,19 @@ namespace FiresLoreBooks.UI
             return sb.ToString();
         }
 
+        private bool _reshowQueued;
+
+        /// <summary>One more ShowPictures after the input field's own LateUpdate has rebuilt its label (R-1012B, 0.0.12).</summary>
+        private System.Collections.IEnumerator ReshowNextFrame()
+        {
+            yield return null;
+            _reshowQueued = true;   // keeps this pass from queueing another
+            if (_open) ShowPictures();
+            int frames = _page != null ? _page.textComponent.rectTransform.GetComponentsInChildren<FiresPictures.PictureFrame>(true).Length : 0;
+            FiresLoreBooksPlugin.Log.LogDebug($"[LoreBooks] editor page {_pageIndex + 1}: {frames} picture frame(s) drawn after the label update");
+            _reshowQueued = false;
+        }
+
         /// <summary>The page's pictures with their handles. Wrap-around would rewrite the field's text, so the editor shows them "past".</summary>
         private void ShowPictures()
         {
@@ -225,8 +238,17 @@ namespace FiresLoreBooks.UI
             _page.textComponent.pageToDisplay = 1;
             // slot-98 retest: no picture drew in the editor. The input field's text component lays out its characters on
             // its own schedule, so the anchors had no character info yet when Show looked them up; force the layout first.
+            // R-1012B (0.0.12): forcing the MESH wasn't enough. TMP_InputField copies its text into the text component in its
+            // own LateUpdate, so right after a page load the component still held the OLD text and no anchor was found (no frame,
+            // no "[Pictures] shown" line). ForceLabelUpdate copies it now; the layout is then forced on the new text, and the
+            // whole thing runs once more next frame in case the field rebuilt its label afterwards.
+            _page.ForceLabelUpdate();
             _page.textComponent.ForceMeshUpdate();
-            FiresLoreBooksPlugin.Log.LogDebug($"[LoreBooks] editor page {_pageIndex + 1}: {view.Count} picture(s) to show");
+            int anchorsInLabel = 0;
+            foreach (char c in _page.textComponent.text) if (c == Anchor) anchorsInLabel++;
+            FiresLoreBooksPlugin.Log.LogDebug($"[LoreBooks] editor page {_pageIndex + 1}: {view.Count} picture(s) to show, {anchorsInLabel} anchor(s) in the laid-out label "
+                + $"({_page.textComponent.textInfo.characterCount} characters)");
+            if (!_reshowQueued && isActiveAndEnabled) { _reshowQueued = true; StartCoroutine(ReshowNextFrame()); }
             FiresPictures.PageLayout.Show(_page.textComponent.rectTransform, (TextMeshProUGUI)_page.textComponent, "Books/" + _doc.Id, view, true,
                 changed =>
                 {

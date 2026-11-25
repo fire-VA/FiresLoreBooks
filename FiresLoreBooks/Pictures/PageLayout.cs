@@ -21,6 +21,9 @@ namespace FiresPictures
         public bool WrapAround = true;
         public string Caption = "";
         public int Anchor;
+        /// <summary>LoreBooks 0.0.16 (Fire: journal pictures placed freely): the journal page (0-based) the picture is pinned to, at x / y of that
+        /// page; -1 (no page= attribute, every tag before 0.0.16) = the old in-flow layout. Add-only: older readers ignore page=.</summary>
+        public int Page = -1;
 
         public ImgSpec Clone() => (ImgSpec)MemberwiseClone();
     }
@@ -67,6 +70,7 @@ namespace FiresPictures
             if (s.Crop != new Rect(0f, 0f, 1f, 1f))
                 sb.Append(" crop=").Append(F(s.Crop.xMin)).Append(',').Append(F(s.Crop.yMin)).Append(',').Append(F(s.Crop.xMax)).Append(',').Append(F(s.Crop.yMax));
             sb.Append(" wrap=").Append(s.WrapAround ? "around" : "past");
+            if (s.Page >= 0) sb.Append(" page=").Append(s.Page.ToString(CultureInfo.InvariantCulture));
             if (!string.IsNullOrEmpty(s.Caption)) sb.Append(" cap=\"").Append(s.Caption.Replace("\"", "'")).Append('"');
             return sb.Append('>').ToString();
         }
@@ -88,6 +92,7 @@ namespace FiresPictures
                     case "rot": s.Rot = Num(val, 0f); break;
                     case "wrap": s.WrapAround = !val.Equals("past", StringComparison.OrdinalIgnoreCase); break;
                     case "cap": s.Caption = val; break;
+                    case "page": if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out int pg) && pg >= 0 && pg < 10000) s.Page = pg; break;
                     case "crop":
                         string[] p = val.Split(',');
                         if (p.Length == 4)
@@ -132,6 +137,10 @@ namespace FiresPictures
         private static bool OnShownPage(TextMeshProUGUI t, int anchor)
         {
             TMP_TextInfo info = t.textInfo;
+            // 0.0.13 (R-1012D: the editor drew 0 frames with its anchors laid out): TMP fills pageInfo only for Page overflow. The
+            // editor's input label isn't paged, so its pageInfo said "character 0 only" and every anchor read as off-page. A text that
+            // isn't paged shows all of it.
+            if (t.overflowMode != TextOverflowModes.Page) return true;
             int page = Mathf.Clamp(t.pageToDisplay - 1, 0, Math.Max(0, info.pageCount - 1));
             if (info.pageCount == 0) return true;
             TMP_PageInfo p = info.pageInfo[page];
@@ -151,9 +160,13 @@ namespace FiresPictures
             foreach (ImgSpec s in imgs)
             {
                 if (!s.WrapAround) continue;
-                float top = s.Y * areaH, bottom = top + PictureFrame.HeightFraction(s) * areaW + PictureFrame.CaptionSpace(s);
-                bool leftSide = s.X + s.W * 0.5f < 0.5f;
-                float marginPx = leftSide ? (s.X + s.W) * areaW + 8f : (1f - s.X) * areaW + 8f;
+                // 0.0.11 (Fire 10-12): the ROTATED frame's box, the same centre and size PictureFrame.Layout draws, clamped
+                // to the page so a picture near an edge never pushes lines off the page or gives a negative band.
+                Rect box = PictureFrame.RotatedBox(s, areaW, areaH);
+                float top = Mathf.Clamp(box.yMin, 0f, areaH), bottom = Mathf.Clamp(box.yMax, 0f, areaH);
+                if (bottom <= top) continue;
+                bool leftSide = box.center.x < areaW * 0.5f;
+                float marginPx = leftSide ? Mathf.Clamp(box.xMax, 0f, areaW) + 8f : Mathf.Clamp(areaW - box.xMin, 0f, areaW) + 8f;
                 int first = -1, lastChar = -1;
                 for (int l = 0; l < info.lineCount; l++)
                 {

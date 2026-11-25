@@ -25,22 +25,58 @@ namespace FiresLoreBooks.Books
         internal static AssetBundle Bundle()
         {
             if (s_bundle != null) return s_bundle;
+            if (s_bundleReleased) return null;   // the dedicated server let it go after building (TrimForDedicatedServer)
+            // LoadFromMemory, not LoadFromStream: a stream-backed bundle keeps reading from its stream, which the using
+            // block closed straight away (assets could come back missing), and the family has had LoadFromStream crashes.
+            byte[] bytes;
             using (var stream = typeof(LorePieces).Assembly.GetManifestResourceStream("FiresLoreBooks.fireslorebooks"))
             {
                 if (stream == null) { FiresLoreBooksPlugin.Log.LogWarning("[LoreBooks] embedded bundle 'fireslorebooks' missing"); return null; }
-                s_bundle = AssetBundle.LoadFromStream(stream);
+                bytes = new byte[stream.Length];
+                int read = 0;
+                while (read < bytes.Length) { int n = stream.Read(bytes, read, bytes.Length - read); if (n <= 0) break; read += n; }
             }
+            s_bundle = AssetBundle.LoadFromMemory(bytes);
+            FiresLoreBooksPlugin.Log.LogDebug($"[LoreBooks] bundle 'fireslorebooks' {(s_bundle != null ? "loaded" : "FAILED to load")} ({bytes.Length:N0} bytes)");
             return s_bundle;
         }
+
+        // 0.0.15 (the lead's memory pass): a dedicated server has no screen. Once the pieces and the item are built from the bundle it
+        // needs nothing more from it: the ~16 MB of bundle data is released (Unload(false) keeps what the built prefabs use), and so
+        // are the textures those prefabs reference, which nothing ever draws there. Clients (the headless test bot included) keep all.
+        private static bool s_trimmed;
+        private static void TrimForDedicatedServer()
+        {
+            if (s_trimmed || s_bundle == null || !FiresCore.Lifecycle.FiresMod.IsDedicatedServer) return;
+            s_trimmed = true;
+            long before = UnityEngine.Profiling.Profiler.GetTotalReservedMemoryLong();
+            var textures = new HashSet<Texture>();
+            foreach (GameObject p in s_pieces.Concat(s_item != null ? new[] { s_item } : new GameObject[0]))
+                foreach (Renderer r in p.GetComponentsInChildren<Renderer>(true))
+                    foreach (Material m in r.sharedMaterials)
+                    {
+                        if (m == null) continue;
+                        foreach (string prop in m.GetTexturePropertyNames()) { Texture t = m.GetTexture(prop); if (t != null) textures.Add(t); }
+                    }
+            s_bundle.Unload(false);
+            s_bundle = null;
+            s_bundleReleased = true;
+            foreach (Texture t in textures) Resources.UnloadAsset(t);
+            long after = UnityEngine.Profiling.Profiler.GetTotalReservedMemoryLong();
+            FiresLoreBooksPlugin.Log.LogInfo($"[LoreBooks] dedicated server: bundle released and {textures.Count} render-only texture(s) unloaded; reserved memory {before / 1048576} -> {after / 1048576} MB");
+        }
+        private static bool s_bundleReleased;   // a dedicated server never reloads it
 
         [HarmonyPatch(typeof(ZNetScene), "Awake")]
         private static class RegisterPieces
         {
             [HarmonyPriority(Priority.Last)]
-            private static void Postfix(ZNetScene __instance)
+            private static void Postfix(ZNetScene __instance) => Build(__instance);
+
+            internal static void Build(ZNetScene __instance)
             {
                 AssetBundle bundle = Bundle();
-                if (bundle == null) return;
+                if (bundle == null && s_pieces.Count == 0) return;   // built once: later sessions re-register even after a dedi released the bundle
                 if (s_holder == null) { s_holder = new GameObject("FiresLoreBooks_Prefabs"); s_holder.SetActive(false); Object.DontDestroyOnLoad(s_holder); }
                 if (s_pieces.Count == 0)
                 {
@@ -60,6 +96,7 @@ namespace FiresLoreBooks.Books
                 }
                 RegisterItem(__instance);
                 if (ObjectDB.instance != null) AddToHammer.Apply(ObjectDB.instance);
+                TrimForDedicatedServer();
             }
         }
 
@@ -92,6 +129,38 @@ namespace FiresLoreBooks.Books
                     __instance.m_itemByHash[ItemName.GetStableHashCode()] = s_item;
                 }
             }
+        }
+
+        /// <summary>
+        /// Fire 10-12: NO lore books on his Hammer. When the local player spawns (after every mod has had ZNetScene/ObjectDB),
+        /// the pieces are built if they never were, put back on the Hammer if anything rebuilt its table, and one Debug line
+        /// lists what is really there: our pieces in the table, their category, and whether this player can place them.
+        /// </summary>
+        [HarmonyPatch(typeof(Player), nameof(Player.OnSpawned))]
+        private static class CheckOnSpawn
+        {
+            private static void Postfix(Player __instance)
+            {
+                if (__instance != Player.m_localPlayer) return;
+                try { Check(); }
+                catch (System.Exception e) { FiresLoreBooksPlugin.Log.LogWarning($"[LoreBooks] hammer check threw {e.GetType().Name}: {e.Message}"); }
+            }
+        }
+
+        /// <summary>The spawn-time check (also lorebook_selftest's first step). Returns how many of our pieces the Hammer holds.</summary>
+        internal static int Check()
+        {
+            if (s_pieces.Count == 0 && ZNetScene.instance != null) RegisterPieces.Build(ZNetScene.instance);
+            if (ObjectDB.instance != null) AddToHammer.Apply(ObjectDB.instance);
+            GameObject hammer = ObjectDB.instance != null ? ObjectDB.instance.GetItemPrefab("Hammer") : null;
+            PieceTable table = hammer != null ? hammer.GetComponent<ItemDrop>()?.m_itemData.m_shared.m_buildPieces : null;
+            int inTable = table != null ? s_pieces.Count(p => table.m_pieces.Contains(p)) : 0;
+            Player me = Player.m_localPlayer;
+            int known = me != null ? s_pieces.Count(p => me.IsRecipeKnown(p.GetComponent<Piece>()?.m_name ?? "")) : 0;
+            FiresLoreBooksPlugin.Log.LogDebug($"[LoreBooks] hammer check: bundle {(s_bundle != null ? "loaded" : "NOT loaded")}, {s_pieces.Count} piece(s) built, "
+                + $"{inTable} on the Hammer table '{(table != null ? table.name : "none")}' ({(table != null ? table.m_pieces.Count : 0)} pieces in it), "
+                + $"category Furniture, {known} known to this player; first: {string.Join(", ", s_pieces.Take(4).Select(p => p.name).ToArray())}");
+            return inTable;
         }
 
         private static GameObject MakePiece(GameObject src, string asName = null)

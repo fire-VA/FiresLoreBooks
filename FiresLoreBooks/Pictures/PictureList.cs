@@ -141,7 +141,7 @@ namespace FiresPictures
 
             private void Update()
             {
-                if (Input.GetKeyDown(KeyCode.Escape)) Close(null);
+                if (FiresCore.Input.FiresKeys.GetKeyDown(KeyCode.Escape)) Close(null);   // 0.0.12: FiresKeys = Input + a test's presses
             }
 
             private void OnDestroy() { if (s_open == this) { s_open = null; _picked?.Invoke(null); _picked = null; } }

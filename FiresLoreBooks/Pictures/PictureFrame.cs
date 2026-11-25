@@ -12,8 +12,12 @@ namespace FiresPictures
     /// gets handles: drag the picture to move it, a corner to resize, the top knob to rotate, ✂ toggles crop mode (drag an edge
     /// to crop that side), ✕ deletes it. Every edit changes the ImgSpec; changed(spec) runs when the drag ends.
     /// </summary>
-    public sealed class PictureFrame : MonoBehaviour, IBeginDragHandler, IDragHandler, IEndDragHandler
+    public sealed class PictureFrame : MonoBehaviour, IBeginDragHandler, IDragHandler, IEndDragHandler, IPointerClickHandler
     {
+        private bool _compact;
+        /// <summary>LoreBooks 0.0.16: a picture's real aspect became known (or changed); the journal lays its text out again.</summary>
+        internal static event Action<string> AspectLearned;
+        private GameObject _handleGroup;   // compact mode: every corner button, shown on double-click
         private const float Border = 8f, CaptionHeight = 26f, HandleSize = 14f;
         private static readonly Color Paper = new Color(0.98f, 0.97f, 0.93f), HandleColor = new Color(0.25f, 0.45f, 0.75f);
         private static readonly Dictionary<string, float> s_aspect = new Dictionary<string, float>();   // src → height / width
@@ -35,8 +39,31 @@ namespace FiresPictures
 
         internal static float CaptionSpace(ImgSpec s) => Border * 2f + (string.IsNullOrEmpty(s.Caption) ? 0f : CaptionHeight);
 
+        /// <summary>
+        /// The frame as Layout draws it (photo + border, caption inside), turned by its rotation about its centre: the
+        /// axis-aligned box it covers, in px within an area of the given size. Centre and size are exactly Layout's, so
+        /// PageLayout.Wrap and the journal's flow reserve what is drawn (LoreBooks 0.0.11, Fire 10-12: rotated pictures).
+        /// </summary>
+        internal static Rect RotatedBox(ImgSpec s, float areaW, float areaH)
+        {
+            float w = s.W * areaW + Border * 2f, h = HeightFraction(s) * areaW + CaptionSpace(s);
+            float cx = s.X * areaW + w * 0.5f, cy = s.Y * areaH + h * 0.5f;     // down from the area's top, as Layout places it
+            float r = s.Rot * Mathf.Deg2Rad;                                    // Layout turns by -Rot; the box is the same either way
+            float c = Mathf.Abs(Mathf.Cos(r)), sn = Mathf.Abs(Mathf.Sin(r));
+            float bw = w * c + h * sn, bh = h * c + w * sn;
+            return new Rect(cx - bw * 0.5f, cy - bh * 0.5f, bw, bh);
+        }
+
         internal static PictureFrame Create(RectTransform area, string folder, ImgSpec spec, bool editable, TMP_FontAsset font,
-            Action<ImgSpec> changed, Action<ImgSpec> deleted)
+            Action<ImgSpec> changed, Action<ImgSpec> deleted) => Create(area, folder, spec, editable, font, changed, deleted, false);
+
+        /// <summary>
+        /// LoreBooks 0.0.16 (Fire: journal handles = neat small corner buttons): compact = the handles are small rounded corner
+        /// buttons (x delete, C crop, R rotate, resize, and &lt; &gt; to move the picture to the previous / next page), hidden
+        /// until the picture is double-clicked and hidden again once an edit is placed. The book editor keeps the old handles.
+        /// </summary>
+        internal static PictureFrame Create(RectTransform area, string folder, ImgSpec spec, bool editable, TMP_FontAsset font,
+            Action<ImgSpec> changed, Action<ImgSpec> deleted, bool compact)
         {
             var go = new GameObject("Picture " + spec.Src, typeof(RectTransform), typeof(Image), typeof(PictureFrame));
             go.transform.SetParent(area, false);
@@ -47,6 +74,7 @@ namespace FiresPictures
             frame._editable = editable;
             frame._changed = changed;
             frame._deleted = deleted;
+            frame._compact = compact;
             go.GetComponent<Image>().color = Paper;
             go.GetComponent<Image>().raycastTarget = editable;
 
@@ -72,12 +100,16 @@ namespace FiresPictures
                 crt.sizeDelta = new Vector2(0f, CaptionHeight); crt.anchoredPosition = new Vector2(0f, Border * 0.5f);
             }
 
-            if (editable) frame.AddHandles();
+            if (editable && compact) frame.AddCompactHandles();
+            else if (editable) frame.AddHandles();
             frame.Layout();
             Store.Get(folder, spec.Src, tex =>
             {
                 if (frame == null || tex == null) return;
-                s_aspect[spec.Src] = tex.height / (float)Mathf.Max(1, tex.width);
+                float aspect = tex.height / (float)Mathf.Max(1, tex.width);
+                bool learned = !s_aspect.TryGetValue(spec.Src, out float had) || Mathf.Abs(had - aspect) > 0.001f;
+                s_aspect[spec.Src] = aspect;
+                if (learned) try { AspectLearned?.Invoke(spec.Src); } catch { }
                 frame._photo.texture = tex;
                 frame._photo.color = Color.white;
                 frame.Layout();
@@ -121,6 +153,104 @@ namespace FiresPictures
             _cropHandles.Add(MakeHandle(Kind.CropTop, new Vector2(0.5f, 1f), new Vector2(0f, -Border), ""));
             _cropHandles.Add(MakeHandle(Kind.CropBottom, new Vector2(0.5f, 0f), Vector2.zero, ""));
             foreach (var c in _cropHandles) { c.GetComponent<Image>().color = new Color(0.85f, 0.35f, 0.2f); c.SetActive(false); }
+        }
+
+        // ── compact handles (journal, LoreBooks 0.0.16) ──
+
+        private const float CornerButton = 22f;
+        private static readonly Color CornerColor = new Color(0.23f, 0.17f, 0.1f, 0.92f), CornerText = new Color(0.95f, 0.9f, 0.78f);
+        private float _rotStart, _rotGrab;
+
+        private void AddCompactHandles()
+        {
+            _handleGroup = new GameObject("Handles", typeof(RectTransform));
+            _handleGroup.transform.SetParent(transform, false);
+            FiresLoreBooks.UI.BookReader.Stretch((RectTransform)_handleGroup.transform);
+            float o = CornerButton * 0.5f - 2f;   // the buttons sit on the frame's corners, mostly outside the print
+            CornerButtonAt("x", new Vector2(0f, 1f), new Vector2(-o, o), () => { FiresLoreBooks.FiresLoreBooksPlugin.Log?.LogDebug($"[Pictures] deleted {_spec.Src} from the page"); _deleted?.Invoke(_spec); }, null);
+            CornerButtonAt("C", new Vector2(1f, 1f), new Vector2(o, o), () => { _cropMode = !_cropMode; foreach (var c in _cropHandles) c.SetActive(_cropMode); }, null);
+            CornerButtonAt("R", new Vector2(0f, 0f), new Vector2(-o, -o), null, Kind.Rotate);
+            CornerButtonAt("+", new Vector2(1f, 0f), new Vector2(o, -o), null, Kind.Resize);
+            CornerButtonAt("<", new Vector2(0.5f, 0f), new Vector2(-CornerButton * 0.6f, -o), () => MovePage(-1), null);
+            CornerButtonAt(">", new Vector2(0.5f, 0f), new Vector2(CornerButton * 0.6f, -o), () => MovePage(1), null);
+            _cropHandles.Add(MakeHandle(Kind.CropLeft, new Vector2(0f, 0.5f), Vector2.zero, ""));
+            _cropHandles.Add(MakeHandle(Kind.CropRight, new Vector2(1f, 0.5f), Vector2.zero, ""));
+            _cropHandles.Add(MakeHandle(Kind.CropTop, new Vector2(0.5f, 1f), new Vector2(0f, -Border), ""));
+            _cropHandles.Add(MakeHandle(Kind.CropBottom, new Vector2(0.5f, 0f), Vector2.zero, ""));
+            foreach (var c in _cropHandles)
+            {
+                c.transform.SetParent(_handleGroup.transform, false);
+                var img = c.GetComponent<Image>();
+                img.color = new Color(0.85f, 0.35f, 0.2f);
+                Round(img, FiresCore.UI.Shell.Kit.FiresTokens.RadiusSmall);
+                c.SetActive(false);
+            }
+            _handleGroup.SetActive(false);
+        }
+
+        private static void Round(Image img, float radius)
+        {
+            try { img.sprite = FiresCore.UI.Shell.Kit.KitSprites.RoundedFill(radius); img.type = Image.Type.Sliced; } catch { }
+        }
+
+        // One small rounded corner button: a click action, or (kind set) a drag handle with the same look.
+        private void CornerButtonAt(string label, Vector2 anchor, Vector2 offset, Action click, Kind? drag)
+        {
+            var go = new GameObject("Corner " + label, typeof(RectTransform), typeof(Image));
+            go.transform.SetParent(_handleGroup.transform, false);
+            var rt = (RectTransform)go.transform;
+            rt.anchorMin = rt.anchorMax = anchor;
+            rt.sizeDelta = new Vector2(CornerButton, CornerButton);
+            rt.anchoredPosition = offset;
+            var img = go.GetComponent<Image>();
+            img.color = CornerColor;
+            Round(img, FiresCore.UI.Shell.Kit.FiresTokens.RadiusSmall);
+            if (drag.HasValue)
+            {
+                var h = go.AddComponent<Handle>();
+                h.Owner = this;
+                h.Kind = drag.Value;
+            }
+            else go.AddComponent<Button>().onClick.AddListener(() => click?.Invoke());
+            var txt = new GameObject("Label", typeof(RectTransform), typeof(TextMeshProUGUI));
+            txt.transform.SetParent(go.transform, false);
+            var t = txt.GetComponent<TextMeshProUGUI>();
+            try { FiresCore.UI.UIFontConfig.ApplyGameFont(t); } catch { }
+            t.richText = false;
+            t.text = label; t.fontSize = 15f; t.alignment = TextAlignmentOptions.Center; t.color = CornerText;
+            t.raycastTarget = false;
+            ((RectTransform)txt.transform).sizeDelta = new Vector2(CornerButton, CornerButton);
+        }
+
+        private void MovePage(int d)
+        {
+            int page = Mathf.Max(0, _spec.Page) + d;
+            if (page < 0) return;
+            _spec.Page = page;
+            Edited(d < 0 ? "page back" : "page on");
+        }
+
+        private void ShowHandles(bool show)
+        {
+            if (_handleGroup == null) return;
+            _handleGroup.SetActive(show);
+            if (!show) { _cropMode = false; foreach (var c in _cropHandles) c.SetActive(false); }
+        }
+
+        /// <summary>Compact mode: a double-click on the picture shows (or hides) its corner buttons.</summary>
+        public void OnPointerClick(PointerEventData e)
+        {
+            if (!_editable || !_compact || e.clickCount < 2) return;
+            ShowHandles(!_handleGroup.activeSelf);
+        }
+
+        private void BeginHandle(Kind kind, PointerEventData e)
+        {
+            if (kind != Kind.Rotate) return;
+            Vector2 p = Local(e);
+            Vector2 centre = new Vector2(_spec.X * _area.rect.width + _rt.sizeDelta.x * 0.5f, _spec.Y * _area.rect.height + _rt.sizeDelta.y * 0.5f);
+            _rotGrab = Mathf.Atan2(p.x - centre.x, centre.y - p.y) * Mathf.Rad2Deg;
+            _rotStart = _spec.Rot;
         }
 
         private GameObject MakeHandle(Kind kind, Vector2 anchor, Vector2 offset, string label)
@@ -184,6 +314,7 @@ namespace FiresPictures
         internal void Edited(string how)
         {
             FiresLoreBooks.FiresLoreBooksPlugin.Log?.LogDebug($"[Pictures] edited {_spec.Src} ({how}): {PageLayout.Write(_spec)}");
+            if (_compact) ShowHandles(false);   // placed: the corner buttons hide until the next double-click
             _changed?.Invoke(_spec);
         }
 
@@ -202,7 +333,9 @@ namespace FiresPictures
                     _spec.Y = (centre.y - (HeightFraction(_spec) * areaW + CaptionSpace(_spec)) * 0.5f) / areaH;
                     break;
                 case Kind.Rotate:
-                    _spec.Rot = Mathf.Round(Mathf.Atan2(p.x - centre.x, centre.y - p.y) * Mathf.Rad2Deg);
+                    float pointer = Mathf.Atan2(p.x - centre.x, centre.y - p.y) * Mathf.Rad2Deg;
+                    // compact: the R button sits on a corner, so the turn is relative to where the drag began
+                    _spec.Rot = Mathf.Round(_compact ? Mathf.DeltaAngle(0f, _rotStart + Mathf.DeltaAngle(_rotGrab, pointer)) : pointer);
                     if (Mathf.Abs(_spec.Rot) < 2f) _spec.Rot = 0f;   // a small snap back to straight
                     break;
                 default:
@@ -231,7 +364,7 @@ namespace FiresPictures
         {
             internal PictureFrame Owner;
             internal Kind Kind;
-            public void OnBeginDrag(PointerEventData e) { }
+            public void OnBeginDrag(PointerEventData e) => Owner.BeginHandle(Kind, e);
             public void OnDrag(PointerEventData e) => Owner.HandleDrag(Kind, e);
             public void OnEndDrag(PointerEventData e) => Owner.Edited(Kind.ToString().ToLowerInvariant());
         }

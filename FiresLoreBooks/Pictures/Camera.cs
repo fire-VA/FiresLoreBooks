@@ -17,6 +17,8 @@ namespace FiresPictures
         private const float FrameScreenShare = 0.72f;   // the frame's height as a share of the screen's
 
         private static ConfigEntry<KeyCode> s_shootKey, s_cancelKey;
+
+        private static bool Key(KeyCode k) => FiresCore.Input.FiresKeys.GetKeyDown(k);
         private static ConfigEntry<int> s_longSide;
         private static Camera s_active;
 
@@ -68,29 +70,33 @@ namespace FiresPictures
             s_active.HideScreenUi();
         }
 
-        private static void BindConfig()
+        /// <summary>Binds the camera keys. The host plugin calls it from Awake with its own Config, so the keys show in the config
+        /// from the start (on first camera use they were missing until then); Begin still calls it as a fallback.</summary>
+        internal static void BindConfig(ConfigFile cfg = null)
         {
             if (s_shootKey != null) return;
-            ConfigFile cfg = BepInEx.Bootstrap.Chainloader.PluginInfos["com.Fire.FiresLoreBooks"].Instance.Config;
+            cfg = cfg ?? BepInEx.Bootstrap.Chainloader.PluginInfos["com.Fire.FiresLoreBooks"].Instance.Config;
             s_shootKey = cfg.Bind("Pictures", "Shoot key", KeyCode.Space, "Camera mode: takes the picture (the left mouse button always does too).");
             s_cancelKey = cfg.Bind("Pictures", "Cancel key", KeyCode.Mouse1, "Camera mode: leaves without a picture (Esc always does too; it does not open the game menu while the camera is up).");
-            s_longSide = cfg.Bind("Pictures", "Picture size", 512, new ConfigDescription("Pixels on the picture's long side.", new AcceptableValueRange<int>(256, 1024)));
+            s_longSide = cfg.Bind("Pictures", "Picture size", 512, new ConfigDescription("Picture resolution: pixels on the long side.", new AcceptableValueRange<int>(256, 1024), new FiresLoreBooks.ConfigurationManagerAttributes { IsAdvanced = true }));
         }
 
         private void Update()
         {
             if (Player.m_localPlayer == null) { End(null); return; }
             if (FiresLoreBooks.UI.Typing.InTextInput()) return;   // 0.0.7: an open Fires panel (the editor) holds an input-block token; only real text input stops the camera's keys
+            // 0.0.12 (R-1012B: OnShot "no answer in 35 s"): the keys are read through Core's FiresKeys, which is UnityEngine.Input
+            // for a player and also sees a test's pressed keys (Input itself can't be injected), so a test drives the same path.
             if (_shot == null)
             {
-                if (Input.GetKeyDown(s_cancelKey.Value) || Input.GetKeyDown(KeyCode.Escape)) End(null);
-                else if (Input.GetKeyDown(s_shootKey.Value) || Input.GetMouseButtonDown(0)) _shootNextFrame = true;
-                else if (Input.GetKeyDown(KeyCode.Q)) _aspect = _aspect == "4:3" ? "1:1" : "4:3";
+                if (Key(s_cancelKey.Value) || Key(KeyCode.Escape)) End(null);
+                else if (Key(s_shootKey.Value) || Key(KeyCode.Mouse0)) _shootNextFrame = true;
+                else if (Key(KeyCode.Q)) _aspect = _aspect == "4:3" ? "1:1" : "4:3";
             }
             else
             {
-                if (Input.GetKeyDown(s_cancelKey.Value) || Input.GetKeyDown(KeyCode.Escape)) Retake();
-                else if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter)) Keep();
+                if (Key(s_cancelKey.Value) || Key(KeyCode.Escape)) Retake();
+                else if (Key(KeyCode.Return) || Key(KeyCode.KeypadEnter)) Keep();
             }
         }
 

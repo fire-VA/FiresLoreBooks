@@ -19,6 +19,9 @@ namespace FiresLoreBooks.Books
         internal const string RpcSave = "FLB_BookSave";      // client -> server: id, full text
         internal const string RpcSaved = "FLB_BookSaved";    // server -> client: id, error ("" = ok)
         internal const string RpcRev = "FLB_BookRev";        // server -> everybody: id, rev
+        internal const string RpcList = "FLB_BookList";      // client -> server: (nothing); server -> client: "id\ttitle\tpages" lines
+        internal const string RpcListed = "FLB_BookListed";
+        internal const string RpcDelete = "FLB_BookDelete";  // client -> server: id (admin); answered with RpcSaved (id, error)
 
         public static string Root => Path.Combine(BepInEx.Paths.ConfigPath, "FiresLoreBooks");
         public static string BooksDir => Path.Combine(Root, "Books");
@@ -68,6 +71,88 @@ namespace FiresLoreBooks.Books
             ZRoutedRpc.instance?.InvokeRoutedRPC(ZRoutedRpc.instance.GetServerPeerID(), RpcSave, doc.Id, doc.Serialize());
         }
 
+        /// <summary>One server book as the admin library lists it.</summary>
+        public struct Entry { public string Id, Title; public int Pages; }
+
+        private static Action<List<Entry>> s_listDone;
+
+        /// <summary>Admin library (Fire 10-12): every book on the server, title + page count; done(list) on the client.</summary>
+        public static void List(Action<List<Entry>> done)
+        {
+            s_listDone = done;
+            ZRoutedRpc.instance?.InvokeRoutedRPC(ZRoutedRpc.instance.GetServerPeerID(), RpcList);
+        }
+
+        /// <summary>Admin: delete a book's server file. done(error) with "" on success.</summary>
+        public static void Delete(string id, Action<string> done)
+        {
+            s_saveDone = done;
+            ZRoutedRpc.instance?.InvokeRoutedRPC(ZRoutedRpc.instance.GetServerPeerID(), RpcDelete, id);
+        }
+
+        /// <summary>A fresh, unused book id ("book_" + 10 hex), as placed pieces get.</summary>
+        public static string NewId() => "book_" + Guid.NewGuid().ToString("N").Substring(0, 10);
+
+        private static void OnList(long sender)
+        {
+            if (!IsServer) return;
+            var lines = new List<string>();
+            try
+            {
+                if (Directory.Exists(BooksDir))
+                    foreach (string f in Directory.GetFiles(BooksDir, "*.txt"))
+                    {
+                        string id = Path.GetFileNameWithoutExtension(f);
+                        if (!ValidId(id)) continue;
+                        BookDoc doc = BookDoc.Parse(id, ReadFile(id) ?? "");
+                        lines.Add(id + "\t" + (doc.Title ?? "").Replace("\t", " ").Replace("\n", " ") + "\t" + doc.Pages.Count);
+                    }
+            }
+            catch (Exception e) { FiresLoreBooksPlugin.Log.LogWarning($"[LoreBooks] listing books threw {e.GetType().Name}: {e.Message}"); }
+            FiresLoreBooksPlugin.Log.LogDebug($"[LoreBooks] list for {sender}: {lines.Count} book(s)");
+            ZRoutedRpc.instance.InvokeRoutedRPC(sender, RpcListed, string.Join("\n", lines.ToArray()));
+        }
+
+        private static void OnListed(long sender, string packed)
+        {
+            var list = new List<Entry>();
+            foreach (string line in (packed ?? "").Split('\n'))
+            {
+                string[] p = line.Split('\t');
+                if (p.Length < 3 || !ValidId(p[0])) continue;
+                int.TryParse(p[2], out int pages);
+                list.Add(new Entry { Id = p[0], Title = p[1], Pages = pages });
+            }
+            list.Sort((a, b) => string.Compare(a.Title.Length > 0 ? a.Title : a.Id, b.Title.Length > 0 ? b.Title : b.Id, StringComparison.OrdinalIgnoreCase));
+            var done = s_listDone; s_listDone = null;
+            done?.Invoke(list);
+        }
+
+        private static void OnDelete(long sender, string id)
+        {
+            if (!IsServer) return;
+            string err = "";
+            if (!ValidId(id)) err = "bad id";
+            else if (!FiresCore.Lifecycle.AdminCheck.IsAdmin(sender)) err = "admin only";
+            else
+            {
+                try
+                {
+                    string p = PathOf(id);
+                    if (!File.Exists(p)) err = "no such book";
+                    else
+                    {
+                        lock (s_ownWrites) s_ownWrites.Add(id);
+                        File.Delete(p);
+                        Bump(id);
+                    }
+                }
+                catch (Exception e) { err = "delete failed"; FiresLoreBooksPlugin.Log.LogWarning($"[LoreBooks] deleting '{id}' threw {e.GetType().Name}: {e.Message}"); }
+            }
+            FiresLoreBooksPlugin.Log.LogDebug($"[LoreBooks] delete '{id}' from {sender}: {(err.Length == 0 ? "deleted" : err)}");
+            ZRoutedRpc.instance.InvokeRoutedRPC(sender, RpcSaved, id, err);
+        }
+
         // ================= RPCs =================
 
         [HarmonyPatch(typeof(ZNet), "Start")]
@@ -86,6 +171,9 @@ namespace FiresLoreBooks.Books
             rpc.Register<string, string>(RpcSave, OnSave);
             rpc.Register<string, string>(RpcSaved, (s, id, err) => { var d = s_saveDone; s_saveDone = null; d?.Invoke(err); });
             rpc.Register<string, int>(RpcRev, OnRev);
+            rpc.Register(RpcList, OnList);
+            rpc.Register<string>(RpcListed, OnListed);
+            rpc.Register<string>(RpcDelete, OnDelete);
             if (IsServer) StartWatcher();
         }
 

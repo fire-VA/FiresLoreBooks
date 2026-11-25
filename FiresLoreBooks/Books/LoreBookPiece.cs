@@ -28,13 +28,43 @@ namespace FiresLoreBooks.Books
 
         public string BookId => _nview != null && _nview.GetZDO() != null ? _nview.GetZDO().GetString(LorePieces.ZdoBookId) : "";
 
+        private string _titleFor;     // the id _title was fetched for (the id can change through the library's picker)
+        private bool _blank;          // no text on the server yet
+
+        /// <summary>
+        /// Admin library (Fire 10-12): points this placed book at another book id. Claims the ZDO (vanilla's ownership
+        /// rule for writing a ZDO) and writes flb_id; every client re-reads it on hover.
+        /// </summary>
+        internal bool SetBookId(string id)
+        {
+            if (_nview == null || _nview.GetZDO() == null || !BookStore.ValidId(id)) return false;
+            if (!_nview.IsOwner()) _nview.ClaimOwnership();
+            _nview.GetZDO().Set(LorePieces.ZdoBookId, id);
+            _title = null;
+            return true;
+        }
+
         public string GetHoverName() => string.IsNullOrEmpty(_title) ? "Lore book" : _title;
 
         public string GetHoverText()
         {
-            if (_title == null && BookId.Length > 0) { _title = ""; BookStore.Get(BookId, d => _title = d != null && d.Title.Length > 0 ? d.Title : "Lore book"); }
-            string admin = UI.BookEditor.IsLocalAdmin() ? "  [<color=yellow><b>$KEY_AltPlace + $KEY_Use</b></color>] Edit" : "";
-            return Localization.instance.Localize($"{GetHoverName()}\n[<color=yellow><b>$KEY_Use</b></color>] Read  [Hold <color=yellow><b>$KEY_Use</b></color>] Take a copy{admin}");
+            string id = BookId;
+            if (id.Length > 0 && (_title == null || _titleFor != id))
+            {
+                _title = ""; _titleFor = id; _blank = false;
+                BookStore.Get(id, d =>
+                {
+                    if (_titleFor != id) return;
+                    _blank = d == null || (d.Title.Length == 0 && d.Pages.TrueForAll(p => string.IsNullOrEmpty(p?.Trim())));
+                    _title = d != null && d.Title.Length > 0 ? d.Title : "Lore book";
+                });
+            }
+            bool admin = UI.BookEditor.IsLocalAdmin();
+            // Fire 10-12: a blank placed book tells admins how to write it; Shift+E opens the library as this book's picker.
+            if (admin && _blank)
+                return Localization.instance.Localize($"Blank lore book\n[<color=yellow><b>$KEY_AltPlace + $KEY_Use</b></color>] Write this book or pick one");
+            string edit = admin ? "  [<color=yellow><b>$KEY_AltPlace + $KEY_Use</b></color>] Books" : "";
+            return Localization.instance.Localize($"{GetHoverName()}\n[<color=yellow><b>$KEY_Use</b></color>] Read  [Hold <color=yellow><b>$KEY_Use</b></color>] Take a copy{edit}");
         }
 
         public float GetHoverOffset() => 0f;
@@ -42,7 +72,7 @@ namespace FiresLoreBooks.Books
         public bool Interact(Humanoid user, bool hold, bool alt)
         {
             if (user != Player.m_localPlayer || BookId.Length == 0) return false;
-            if (alt && !hold) { UI.BookEditor.Open(BookId); return true; }
+            if (alt && !hold) { UI.BookLibrary.OpenFor(this); return true; }
             if (!hold) { _pressAt = Time.time; _tookThisHold = false; return true; }
             if (_tookThisHold) return false;
             _tookThisHold = true;
